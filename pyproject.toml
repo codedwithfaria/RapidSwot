@@ -1,0 +1,29 @@
+[tool.poetry]
+name = "rapidswot"
+version = "0.1.0"
+description = "AI browser agent for automating repetitive online tasks with high-context capacity"
+authors = ["Your Name <your.email@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+transformers = "^4.35.0"
+torch = "^2.1.0"
+selenium = "^4.14.0"
+beautifulsoup4 = "^4.12.0"
+networkx = "^3.1"
+rdflib = "^7.0.0"
+pytz = "^2023.3"
+gitpython = "^3.1.40"
+python-dotenv = "^1.0.0"
+fastapi = "^0.104.0"
+uvicorn = "^0.23.2"
+
+[tool.poetry.dev-dependencies]
+pytest = "^7.4.0"
+black = "^23.9.1"
+isort = "^5.12.0"
+mypy = "^1.5.1"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
