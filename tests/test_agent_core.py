@@ -3,7 +3,7 @@ from typing import Any, Dict
 
 import pytest
 
-from src.agent.core.agent import ActionPlan, ExecutionEngine, IntentProcessor
+from src.agent.core.agent import ActionPlan, ExecutionEngine, IntentProcessor, PlanParser
 from src.sequential.planner import Step
 
 
@@ -13,7 +13,7 @@ class DummyLlm:
 
 
 def test_extract_json_from_fenced_block():
-    processor = IntentProcessor(DummyLlm())
+    parser = PlanParser()
     response = """
     Sure, here is the plan:
     ```json
@@ -21,21 +21,21 @@ def test_extract_json_from_fenced_block():
     ```
     """
 
-    extracted = processor._extract_json_block(response)
+    extracted = parser._extract_json_block(response)
 
     assert extracted == '{"steps": ["a"], "resources": {}}'
 
 
 def test_parse_llm_response_returns_default_for_empty():
-    processor = IntentProcessor(DummyLlm())
+    parser = PlanParser()
 
-    plan = processor._parse_llm_response("")
+    plan = parser.parse("")
 
     assert plan == {"steps": [], "resources": {}, "duration": 0.0, "metrics": {}}
 
 
 def test_parse_llm_response_normalizes_plan():
-    processor = IntentProcessor(DummyLlm())
+    parser = PlanParser()
     response = """
     Plan details:
     ```json
@@ -51,7 +51,7 @@ def test_parse_llm_response_normalizes_plan():
     ```
     """
 
-    plan = processor._parse_llm_response(response)
+    plan = parser.parse(response)
 
     assert plan["steps"][0]["tool"] == "search"
     assert plan["steps"][1] == {"description": "Fallback description", "tool": "", "params": {}}
@@ -61,16 +61,38 @@ def test_parse_llm_response_normalizes_plan():
 
 
 def test_parse_llm_response_handles_missing_steps():
-    processor = IntentProcessor(DummyLlm())
+    parser = PlanParser()
     response = """
     ```json
     {"Resources": {"cpu": 2}}
     ```
     """
 
-    plan = processor._parse_llm_response(response)
+    plan = parser.parse(response)
 
     assert plan == {"steps": [], "resources": {"cpu": 2}, "duration": 0.0, "metrics": {}}
+
+
+def test_plan_parser_extracts_structured_text_plan():
+    parser = PlanParser()
+    response = """
+    Plan overview:
+    1. Investigate logs for recent failures (tool=search, params={"query": "error"})
+    2. Summarize findings for stakeholders (tool=report)
+    Resources: laptop, vpn access
+    Estimated Duration: 45 minutes
+    Success Metrics: {"accuracy": 0.9, "latency_reduction": "<5%"}
+    """
+
+    plan = parser.parse(response)
+
+    assert plan["steps"][0]["description"].startswith("Investigate logs")
+    assert plan["steps"][0]["tool"] == "search"
+    assert plan["steps"][0]["params"] == {"query": "error"}
+    assert plan["steps"][1]["tool"] == "report"
+    assert plan["resources"]["items"] == ["laptop", "vpn access"]
+    assert plan["duration"] == 45.0
+    assert plan["metrics"] == {"accuracy": 0.9, "latency_reduction": "<5%"}
 
 
 def test_execution_engine_handles_sync_and_async_tools():

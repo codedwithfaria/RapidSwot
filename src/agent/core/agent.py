@@ -132,6 +132,228 @@ class ActionPlan:
     estimated_duration: float
     success_metrics: Dict[str, Any]
 
+class PlanParser:
+    """Parse heterogeneous LLM responses into canonical plan structures."""
+
+    BULLET_PATTERN = re.compile(r"^\s*(?:\d+[\.)]|[-*])\s+(?P<body>.+)$")
+    KEY_VALUE_PATTERN = re.compile(r"^\s*([A-Za-z_\s]+):\s*(.+?)\s*$")
+    JSON_BLOCK_PATTERN = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+    CURLY_BLOCK_PATTERN = re.compile(r"(\{.*\})", re.DOTALL)
+    DEFAULT_PLAN = {
+        "steps": [],
+        "resources": {},
+        "duration": 0.0,
+        "metrics": {},
+    }
+
+    def parse(self, response: str) -> Dict[str, Any]:
+        """Parse an LLM response into a plan dictionary."""
+
+        if not response or not response.strip():
+            logger.warning("Empty response received from LLM; using default plan structure")
+            return dict(self.DEFAULT_PLAN)
+
+        json_block = self._extract_json_block(response)
+        if json_block:
+            parsed = self._try_parse_json(json_block)
+            if parsed:
+                normalized = self._normalize_plan(parsed)
+                if normalized != self.DEFAULT_PLAN:
+                    return normalized
+
+        structured = self._parse_structured_text(response)
+        if structured:
+            return structured
+
+        logger.info("Falling back to default plan parsing for response: %s", response)
+        return dict(self.DEFAULT_PLAN)
+
+    def _extract_json_block(self, response: str) -> Optional[str]:
+        match = self.JSON_BLOCK_PATTERN.search(response)
+        if match:
+            return match.group(1)
+
+        curly = self.CURLY_BLOCK_PATTERN.search(response)
+        if curly:
+            return curly.group(1)
+        return None
+
+    @staticmethod
+    def _try_parse_json(candidate: str) -> Optional[Dict[str, Any]]:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            logger.warning("Failed to parse JSON block from LLM response: %s", exc)
+            return None
+        if not isinstance(parsed, dict):
+            logger.debug("Parsed JSON is not an object: %r", parsed)
+            return None
+        return parsed
+
+    def _parse_structured_text(self, response: str) -> Optional[Dict[str, Any]]:
+        steps: List[Dict[str, Any]] = []
+        resources: Optional[Any] = None
+        metrics: Optional[Any] = None
+        duration: Optional[float] = None
+
+        for line in response.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            bullet_match = self.BULLET_PATTERN.match(line)
+            if bullet_match:
+                step = self._parse_step_line(bullet_match.group("body"))
+                if step:
+                    steps.append(step)
+                continue
+
+            key_value = self.KEY_VALUE_PATTERN.match(line)
+            if not key_value:
+                continue
+
+            key = key_value.group(1).strip().lower()
+            value = key_value.group(2).strip()
+
+            if key in {"resources", "resource requirements"}:
+                resources = self._parse_value(value)
+            elif key in {"success metrics", "metrics"}:
+                metrics = self._parse_value(value)
+            elif key in {"estimated duration", "duration", "time estimate"}:
+                duration = self._parse_duration(value)
+
+        if not steps and resources is None and metrics is None and duration is None:
+            return None
+
+        return {
+            "steps": steps,
+            "resources": resources if isinstance(resources, dict) else self._wrap_value(resources, "items"),
+            "duration": duration if duration is not None else 0.0,
+            "metrics": metrics if isinstance(metrics, dict) else self._wrap_value(metrics, "details"),
+        }
+
+    def _parse_step_line(self, body: str) -> Optional[Dict[str, Any]]:
+        tool_name = ""
+        params: Dict[str, Any] = {}
+        description = body
+
+        meta_match = re.search(r"\(([^()]*)\)\s*$", body)
+        if meta_match:
+            description = body[: meta_match.start()].strip()
+            meta = meta_match.group(1)
+            tool_name = self._extract_tool(meta)
+            params = self._extract_params(meta)
+
+        if not description:
+            description = body
+
+        return {
+            "description": description.strip(),
+            "tool": tool_name,
+            "params": params,
+        }
+
+    @staticmethod
+    def _extract_tool(meta: str) -> str:
+        tool_match = re.search(r"tool\s*=\s*([A-Za-z0-9_\-\.]+)", meta)
+        if tool_match:
+            return tool_match.group(1)
+        return ""
+
+    def _extract_params(self, meta: str) -> Dict[str, Any]:
+        params_match = re.search(r"params\s*=\s*(\{.*\})", meta)
+        if not params_match:
+            return {}
+        params_text = params_match.group(1)
+        try:
+            parsed = json.loads(params_text)
+        except json.JSONDecodeError:
+            logger.debug("Failed to parse params JSON from meta: %s", meta)
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+        return {}
+
+    @staticmethod
+    def _parse_value(raw: str) -> Any:
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            parts = [part.strip() for part in raw.split(",") if part.strip()]
+            if len(parts) > 1:
+                return parts
+            return raw
+        return value
+
+    @staticmethod
+    def _wrap_value(value: Any, key: str) -> Dict[str, Any]:
+        if value is None or value == "":
+            return {}
+        if isinstance(value, dict):
+            return value
+        return {key: value}
+
+    @staticmethod
+    def _parse_duration(raw: str) -> Optional[float]:
+        number_match = re.search(r"(\d+(?:\.\d+)?)", raw)
+        if not number_match:
+            return None
+        try:
+            return float(number_match.group(1))
+        except ValueError:
+            return None
+
+    def _normalize_plan(self, raw_plan: Dict[str, Any]) -> Dict[str, Any]:
+        def _normalize_steps(steps: Union[List[Any], Dict[str, Any], None]) -> List[Dict[str, Any]]:
+            if steps is None:
+                return []
+            if isinstance(steps, dict):
+                values = steps.values()
+            else:
+                values = steps  # type: ignore[assignment]
+
+            normalized: List[Dict[str, Any]] = []
+            for idx, step in enumerate(values):
+                if isinstance(step, dict):
+                    payload = dict(step)
+                    payload.setdefault("tool", step.get("tool", step.get("action", "")))
+                    payload.setdefault("params", step.get("params", {}))
+                    normalized.append(payload)
+                elif isinstance(step, str):
+                    normalized.append({"description": step, "tool": "", "params": {}})
+                else:
+                    logger.debug("Skipping unsupported step format at index %s: %r", idx, step)
+            return normalized
+
+        key_sets = {
+            "steps": ("steps", "Steps", "plan", "Plan"),
+            "resources": ("resources", "Resources"),
+            "duration": ("estimated_duration", "duration", "Duration"),
+            "metrics": ("success_metrics", "metrics", "Metrics"),
+        }
+
+        resolved: Dict[str, Any] = {}
+        for canonical_key, options in key_sets.items():
+            match, value = self._first_matching_key(raw_plan, options)
+            if match is None:
+                value = None
+            resolved[canonical_key] = value
+
+        return {
+            "steps": _normalize_steps(resolved["steps"]),
+            "resources": resolved["resources"] or {},
+            "duration": float(resolved["duration"]) if isinstance(resolved["duration"], (int, float)) else 0.0,
+            "metrics": resolved["metrics"] or {},
+        }
+
+    @staticmethod
+    def _first_matching_key(data: Dict[str, Any], keys: Tuple[str, ...]) -> Tuple[Optional[str], Any]:
+        for key in keys:
+            if key in data:
+                return key, data[key]
+        return None, None
+
+
 class IntentProcessor:
     """Processes high-level intents into structured action plans."""
 
@@ -139,9 +361,11 @@ class IntentProcessor:
         self,
         llm_agent: LlmAgent,
         prompt_guide: Optional[PromptEngineeringGuide] = None,
+        plan_parser: Optional[PlanParser] = None,
     ):
         self.llm = llm_agent
         self.prompt_guide = prompt_guide or PromptEngineeringGuide()
+        self.plan_parser = plan_parser or PlanParser()
 
     async def process_intent(
         self,
@@ -167,128 +391,15 @@ class IntentProcessor:
             prompt_sections.append(self.prompt_guide.format_instructions(techniques))
 
         prompt = "\n".join(prompt_sections)
-
-        # Use LLM to analyze and structure the intent
         response = await self.llm.generate_response(prompt)
-        
-        # Parse LLM response into structured plan
-        plan_data = self._parse_llm_response(response)
+        plan_data = self.plan_parser.parse(response)
 
         return ActionPlan(
             steps=plan_data["steps"],
             resources=plan_data["resources"],
             estimated_duration=plan_data["duration"],
-            success_metrics=plan_data["metrics"]
+            success_metrics=plan_data["metrics"],
         )
-
-    def _parse_llm_response(self, response: str) -> Dict[str, Any]:
-        """Parse an LLM response into a structured action plan."""
-
-        if not response or not response.strip():
-            logger.warning("Empty response received from LLM; using default plan structure")
-            return self._default_plan()
-
-        json_block = self._extract_json_block(response)
-
-        if json_block:
-            try:
-                parsed = json.loads(json_block)
-            except json.JSONDecodeError as exc:
-                logger.warning("Failed to parse JSON block from LLM response: %s", exc)
-            else:
-                normalized = self._normalize_plan(parsed)
-                if normalized != self._default_plan():
-                    return normalized
-                logger.info("Parsed plan did not contain meaningful content; using default")
-
-        logger.info("Falling back to default plan parsing for response: %s", response)
-        return self._default_plan()
-
-    @staticmethod
-    def _default_plan() -> Dict[str, Any]:
-        """Return a canonical empty plan structure."""
-
-        return {
-            "steps": [],
-            "resources": {},
-            "duration": 0.0,
-            "metrics": {},
-        }
-
-    @staticmethod
-    def _extract_json_block(response: str) -> Optional[str]:
-        """Extract the first JSON block from an LLM response."""
-
-        fenced_match = re.search(r"```json\s*(\{.*?\})\s*```", response, re.DOTALL)
-        if fenced_match:
-            return fenced_match.group(1)
-
-        curly_match = re.search(r"(\{.*\})", response, re.DOTALL)
-        if curly_match:
-            return curly_match.group(1)
-
-        return None
-
-    @staticmethod
-    def _normalize_plan(raw_plan: Dict[str, Any]) -> Dict[str, Any]:
-        """Ensure the parsed plan contains the expected structure and defaults."""
-
-        def _normalize_steps(steps: Union[List[Any], Dict[str, Any], None]) -> List[Dict[str, Any]]:
-            if steps is None:
-                return []
-            if isinstance(steps, dict):
-                steps_iter: Iterable[Any] = steps.values()
-            else:
-                steps_iter = steps  # type: ignore[assignment]
-
-            normalized_steps: List[Dict[str, Any]] = []
-            for idx, step in enumerate(steps_iter):
-                if isinstance(step, dict):
-                    normalized_steps.append(step)
-                elif isinstance(step, str):
-                    normalized_steps.append({"description": step, "tool": "", "params": {}})
-                else:
-                    logger.debug("Skipping unsupported step format at index %s: %r", idx, step)
-            return normalized_steps
-
-        steps_key, steps_value = IntentProcessor._first_matching_key(
-            raw_plan,
-            ("steps", "Steps", "plan", "Plan"),
-        )
-        _, resources_value = IntentProcessor._first_matching_key(
-            raw_plan,
-            ("resources", "Resources"),
-        )
-        _, duration_value = IntentProcessor._first_matching_key(
-            raw_plan,
-            ("estimated_duration", "duration", "Duration"),
-        )
-        _, metrics_value = IntentProcessor._first_matching_key(
-            raw_plan,
-            ("success_metrics", "metrics", "Metrics"),
-        )
-
-        if steps_key is None:
-            logger.debug("Plan data missing steps; returning empty list")
-
-        return {
-            "steps": _normalize_steps(steps_value),
-            "resources": resources_value or {},
-            "duration": float(duration_value) if isinstance(duration_value, (int, float)) else 0.0,
-            "metrics": metrics_value or {},
-        }
-
-    @staticmethod
-    def _first_matching_key(
-        data: Dict[str, Any],
-        keys: Tuple[str, ...],
-    ) -> Tuple[Optional[str], Any]:
-        """Return the first matching key and its value from ``data``."""
-
-        for key in keys:
-            if key in data:
-                return key, data[key]
-        return None, None
 
 ToolFn = Callable[[Dict[str, Any], Dict[str, Any]], Union[Any, Awaitable[Any]]]
 
