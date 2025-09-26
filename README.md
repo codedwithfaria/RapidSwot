@@ -2,6 +2,16 @@
 
 Repetitive work is dead. RapidSwot empowers anyone to automate repetitive online tasks, no code required. No barriers. Simply tell it what you want done.
 
+## 🌟 Features
+
+- No-code browser automation with AI
+- MCP server for AI assistant integration (Claude Desktop, etc.)
+- Automated QA testing with Vibetest
+- Ultra-high context capacity (2M tokens)
+- Multiple LLM backends (Gemini, OpenAI, Anthropic)
+- Task chaining and persistent sessions
+- Vision capabilities for visual automation
+
 ## 🚀 Features
 
 - No-code browser automation
