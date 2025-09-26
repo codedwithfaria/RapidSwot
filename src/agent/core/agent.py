@@ -1,12 +1,21 @@
-"""
-Core implementation of the RapidSwot intelligent agent system.
-Bridges the gap between high-level intentions and concrete actions.
-"""
+"""Core agent implementation for bridging high-level intents to actions."""
+
 import asyncio
-from typing import Any, Dict, List, Optional, Union, AsyncGenerator
-from dataclasses import dataclass, field
-from datetime import datetime
+import json
 import logging
+import re
+from typing import (
+    Any,
+    AsyncGenerator,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Union,
+)
+from dataclasses import dataclass, field
 
 from google.adk.agents import BaseAgent, LlmAgent
 from google.adk.events import Event, EventActions
@@ -35,10 +44,10 @@ class ActionPlan:
 
 class IntentProcessor:
     """Processes high-level intents into structured action plans."""
-    
+
     def __init__(self, llm_agent: LlmAgent):
         self.llm = llm_agent
-    
+
     async def process_intent(self, intent: TaskIntent) -> ActionPlan:
         """Convert a high-level intent into an action plan."""
         # Use LLM to analyze and structure the intent
@@ -57,36 +66,106 @@ class IntentProcessor:
         
         # Parse LLM response into structured plan
         plan_data = self._parse_llm_response(response)
-        
+
         return ActionPlan(
             steps=plan_data["steps"],
             resources=plan_data["resources"],
             estimated_duration=plan_data["duration"],
             success_metrics=plan_data["metrics"]
         )
-    
+
     def _parse_llm_response(self, response: str) -> Dict[str, Any]:
-        """Parse LLM response into structured data."""
-        # Add parsing logic here
-        # This is a placeholder implementation
+        """Parse an LLM response into a structured action plan."""
+
+        def _default_plan() -> Dict[str, Any]:
+            return {
+                "steps": [],
+                "resources": {},
+                "duration": 0.0,
+                "metrics": {},
+            }
+
+        if not response or not response.strip():
+            logger.warning("Empty response received from LLM; using default plan structure")
+            return _default_plan()
+
+        json_block = self._extract_json_block(response)
+
+        if json_block:
+            try:
+                parsed = json.loads(json_block)
+                return self._normalize_plan(parsed)
+            except json.JSONDecodeError as exc:
+                logger.warning("Failed to parse JSON block from LLM response: %s", exc)
+
+        logger.info("Falling back to default plan parsing for response: %s", response)
+        return _default_plan()
+
+    @staticmethod
+    def _extract_json_block(response: str) -> Optional[str]:
+        """Extract the first JSON block from an LLM response."""
+
+        fenced_match = re.search(r"```json\s*(\{.*?\})\s*```", response, re.DOTALL)
+        if fenced_match:
+            return fenced_match.group(1)
+
+        curly_match = re.search(r"(\{.*\})", response, re.DOTALL)
+        if curly_match:
+            return curly_match.group(1)
+
+        return None
+
+    @staticmethod
+    def _normalize_plan(raw_plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensure the parsed plan contains the expected structure and defaults."""
+
+        def _normalize_steps(steps: Union[List[Any], Dict[str, Any], None]) -> List[Dict[str, Any]]:
+            if steps is None:
+                return []
+            if isinstance(steps, dict):
+                steps_iter: Iterable[Any] = steps.values()
+            else:
+                steps_iter = steps  # type: ignore[assignment]
+
+            normalized_steps: List[Dict[str, Any]] = []
+            for idx, step in enumerate(steps_iter):
+                if isinstance(step, dict):
+                    normalized_steps.append(step)
+                elif isinstance(step, str):
+                    normalized_steps.append({"description": step, "tool": "", "params": {}})
+                else:
+                    logger.debug("Skipping unsupported step format at index %s: %r", idx, step)
+            return normalized_steps
+
         return {
-            "steps": [],
-            "resources": {},
-            "duration": 0.0,
-            "metrics": {}
+            "steps": _normalize_steps(
+                raw_plan.get("steps")
+                or raw_plan.get("Steps")
+                or raw_plan.get("plan")
+            ),
+            "resources": raw_plan.get("resources") or raw_plan.get("Resources") or {},
+            "duration": raw_plan.get("estimated_duration")
+            or raw_plan.get("duration")
+            or 0.0,
+            "metrics": raw_plan.get("success_metrics")
+            or raw_plan.get("metrics")
+            or {},
         }
+
+ToolFn = Callable[[Dict[str, Any], Dict[str, Any]], Union[Any, Awaitable[Any]]]
+
 
 class ExecutionEngine:
     """Executes action plans using available tools and resources."""
-    
+
     def __init__(self):
-        self.available_tools: Dict[str, callable] = {}
+        self.available_tools: Dict[str, ToolFn] = {}
         self.active_executions: Dict[str, asyncio.Task] = {}
-    
-    def register_tool(self, name: str, tool: callable):
+
+    def register_tool(self, name: str, tool: ToolFn) -> None:
         """Register a new tool for task execution."""
         self.available_tools[name] = tool
-    
+
     async def execute_plan(
         self,
         plan: ActionPlan,
@@ -98,9 +177,10 @@ class ExecutionEngine:
                 tool = self.available_tools.get(step["tool"])
                 if not tool:
                     raise ValueError(f"Tool not found: {step['tool']}")
-                
-                result = await tool(step["params"], context)
-                
+
+                invocation = tool(step.get("params", {}), context)
+                result = await invocation if asyncio.iscoroutine(invocation) else invocation
+
                 yield Event(
                     author="ExecutionEngine",
                     content={"step": step, "result": result},
