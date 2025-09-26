@@ -59,6 +59,19 @@ def test_parse_llm_response_normalizes_plan():
     assert plan["metrics"] == {"success": "found"}
 
 
+def test_parse_llm_response_handles_missing_steps():
+    processor = IntentProcessor(DummyLlm())
+    response = """
+    ```json
+    {"Resources": {"cpu": 2}}
+    ```
+    """
+
+    plan = processor._parse_llm_response(response)
+
+    assert plan == {"steps": [], "resources": {"cpu": 2}, "duration": 0.0, "metrics": {}}
+
+
 def test_execution_engine_handles_sync_and_async_tools():
     engine = ExecutionEngine()
 
@@ -123,3 +136,27 @@ def test_execution_engine_emits_error_event_on_failure():
     assert len(events) == 1
     assert "boom" in events[0].content["error"]
     assert events[0].actions.escalate is True
+
+
+def test_execution_engine_validates_step_structure():
+    engine = ExecutionEngine()
+    engine.register_tool("noop", lambda params, ctx: None)
+
+    plan = ActionPlan(
+        steps=["invalid-step"],
+        resources={},
+        estimated_duration=0.0,
+        success_metrics={},
+    )
+
+    events = []
+
+    async def _collect_events():
+        async for event in engine.execute_plan(plan, {}):
+            events.append(event)
+
+    asyncio.run(_collect_events())
+
+    assert len(events) == 1
+    assert events[0].actions.escalate is True
+    assert "mapping" in events[0].content["error"]

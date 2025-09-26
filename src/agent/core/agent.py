@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from dataclasses import dataclass, field
 from typing import (
     Any,
     AsyncGenerator,
@@ -13,16 +14,15 @@ from typing import (
     Iterable,
     List,
     Optional,
+    Tuple,
     Union,
 )
-from dataclasses import dataclass, field
 
 from google.adk.agents import BaseAgent, LlmAgent
 from google.adk.events import Event, EventActions
 from google.adk.agents.invocation_context import InvocationContext
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -77,29 +77,36 @@ class IntentProcessor:
     def _parse_llm_response(self, response: str) -> Dict[str, Any]:
         """Parse an LLM response into a structured action plan."""
 
-        def _default_plan() -> Dict[str, Any]:
-            return {
-                "steps": [],
-                "resources": {},
-                "duration": 0.0,
-                "metrics": {},
-            }
-
         if not response or not response.strip():
             logger.warning("Empty response received from LLM; using default plan structure")
-            return _default_plan()
+            return self._default_plan()
 
         json_block = self._extract_json_block(response)
 
         if json_block:
             try:
                 parsed = json.loads(json_block)
-                return self._normalize_plan(parsed)
             except json.JSONDecodeError as exc:
                 logger.warning("Failed to parse JSON block from LLM response: %s", exc)
+            else:
+                normalized = self._normalize_plan(parsed)
+                if normalized != self._default_plan():
+                    return normalized
+                logger.info("Parsed plan did not contain meaningful content; using default")
 
         logger.info("Falling back to default plan parsing for response: %s", response)
-        return _default_plan()
+        return self._default_plan()
+
+    @staticmethod
+    def _default_plan() -> Dict[str, Any]:
+        """Return a canonical empty plan structure."""
+
+        return {
+            "steps": [],
+            "resources": {},
+            "duration": 0.0,
+            "metrics": {},
+        }
 
     @staticmethod
     def _extract_json_block(response: str) -> Optional[str]:
@@ -137,20 +144,44 @@ class IntentProcessor:
                     logger.debug("Skipping unsupported step format at index %s: %r", idx, step)
             return normalized_steps
 
+        steps_key, steps_value = IntentProcessor._first_matching_key(
+            raw_plan,
+            ("steps", "Steps", "plan", "Plan"),
+        )
+        _, resources_value = IntentProcessor._first_matching_key(
+            raw_plan,
+            ("resources", "Resources"),
+        )
+        _, duration_value = IntentProcessor._first_matching_key(
+            raw_plan,
+            ("estimated_duration", "duration", "Duration"),
+        )
+        _, metrics_value = IntentProcessor._first_matching_key(
+            raw_plan,
+            ("success_metrics", "metrics", "Metrics"),
+        )
+
+        if steps_key is None:
+            logger.debug("Plan data missing steps; returning empty list")
+
         return {
-            "steps": _normalize_steps(
-                raw_plan.get("steps")
-                or raw_plan.get("Steps")
-                or raw_plan.get("plan")
-            ),
-            "resources": raw_plan.get("resources") or raw_plan.get("Resources") or {},
-            "duration": raw_plan.get("estimated_duration")
-            or raw_plan.get("duration")
-            or 0.0,
-            "metrics": raw_plan.get("success_metrics")
-            or raw_plan.get("metrics")
-            or {},
+            "steps": _normalize_steps(steps_value),
+            "resources": resources_value or {},
+            "duration": float(duration_value) if isinstance(duration_value, (int, float)) else 0.0,
+            "metrics": metrics_value or {},
         }
+
+    @staticmethod
+    def _first_matching_key(
+        data: Dict[str, Any],
+        keys: Tuple[str, ...],
+    ) -> Tuple[Optional[str], Any]:
+        """Return the first matching key and its value from ``data``."""
+
+        for key in keys:
+            if key in data:
+                return key, data[key]
+        return None, None
 
 ToolFn = Callable[[Dict[str, Any], Dict[str, Any]], Union[Any, Awaitable[Any]]]
 
@@ -174,9 +205,16 @@ class ExecutionEngine:
         """Execute an action plan step by step."""
         for step in plan.steps:
             try:
-                tool = self.available_tools.get(step["tool"])
+                if not isinstance(step, dict):
+                    raise TypeError(f"Plan step must be a mapping, received: {type(step)!r}")
+
+                tool_name = step.get("tool")
+                if not tool_name:
+                    raise KeyError("Plan step missing required 'tool' field")
+
+                tool = self.available_tools.get(tool_name)
                 if not tool:
-                    raise ValueError(f"Tool not found: {step['tool']}")
+                    raise ValueError(f"Tool not found: {tool_name}")
 
                 invocation = tool(step.get("params", {}), context)
                 result = await invocation if asyncio.iscoroutine(invocation) else invocation
