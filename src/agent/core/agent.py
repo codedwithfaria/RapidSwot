@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from dataclasses import asdict, dataclass, field, is_dataclass
+from enum import Enum
 from typing import (
     Any,
     AsyncGenerator,
@@ -47,6 +48,74 @@ class PlanStepLike(Protocol):
 PlanStep = Union[Dict[str, Any], PlanStepLike]
 
 
+class PromptTechnique(Enum):
+    """Prompt engineering techniques supported by the agent."""
+
+    ZERO_SHOT = "Zero-shot Prompting"
+    FEW_SHOT = "Few-shot Prompting"
+    CHAIN_OF_THOUGHT = "Chain-of-Thought Prompting"
+    META = "Meta Prompting"
+    SELF_CONSISTENCY = "Self-Consistency"
+    GENERATE_KNOWLEDGE = "Generate Knowledge Prompting"
+    PROMPT_CHAINING = "Prompt Chaining"
+    TREE_OF_THOUGHTS = "Tree of Thoughts"
+    RETRIEVAL_AUGMENTED = "Retrieval Augmented Generation"
+    AUTOMATIC_REASONING_TOOL_USE = "Automatic Reasoning and Tool-use"
+    AUTOMATIC_PROMPT_ENGINEER = "Automatic Prompt Engineer"
+    ACTIVE_PROMPT = "Active-Prompt"
+    DIRECTIONAL_STIMULUS = "Directional Stimulus Prompting"
+    PROGRAM_AIDED = "Program-Aided Language Models"
+    REACT = "ReAct"
+    REFLEXION = "Reflexion"
+    MULTIMODAL_COT = "Multimodal CoT"
+    GRAPH_PROMPTING = "Graph Prompting"
+
+    @property
+    def description(self) -> str:
+        """Human-readable description for documentation and prompting."""
+
+        return _TECHNIQUE_DESCRIPTIONS[self]
+
+
+_TECHNIQUE_DESCRIPTIONS: Dict[PromptTechnique, str] = {
+    PromptTechnique.ZERO_SHOT: "Solve tasks directly from instructions without examples to test generalization.",
+    PromptTechnique.FEW_SHOT: "Provide representative examples to guide the model toward desired outputs.",
+    PromptTechnique.CHAIN_OF_THOUGHT: "Encourage explicit reasoning steps before answering for complex problems.",
+    PromptTechnique.META: "Use instructions that describe how to construct or critique prompts themselves.",
+    PromptTechnique.SELF_CONSISTENCY: "Sample multiple reasoning paths and pick the most consistent answer.",
+    PromptTechnique.GENERATE_KNOWLEDGE: "Ask the model to recall or synthesize supporting facts before solving.",
+    PromptTechnique.PROMPT_CHAINING: "Break tasks into sequential prompts whose outputs feed later steps.",
+    PromptTechnique.TREE_OF_THOUGHTS: "Explore alternative reasoning branches and evaluate the best path.",
+    PromptTechnique.RETRIEVAL_AUGMENTED: "Retrieve external knowledge to ground responses in authoritative data.",
+    PromptTechnique.AUTOMATIC_REASONING_TOOL_USE: "Let the model autonomously call tools or APIs when needed.",
+    PromptTechnique.AUTOMATIC_PROMPT_ENGINEER: "Iteratively refine prompts with model feedback to improve results.",
+    PromptTechnique.ACTIVE_PROMPT: "Prioritize difficult examples when crafting few-shot demonstrations.",
+    PromptTechnique.DIRECTIONAL_STIMULUS: "Nudge generation with steering phrases that emphasize desired traits.",
+    PromptTechnique.PROGRAM_AIDED: "Pair natural language with code execution for reliable calculations.",
+    PromptTechnique.REACT: "Mix reasoning traces with tool actions for grounded decision making.",
+    PromptTechnique.REFLEXION: "Reflect on earlier attempts and critique them to self-correct.",
+    PromptTechnique.MULTIMODAL_COT: "Extend chain-of-thought to combine textual and visual reasoning.",
+    PromptTechnique.GRAPH_PROMPTING: "Represent relational knowledge explicitly to support structured reasoning.",
+}
+
+
+@dataclass
+class PromptEngineeringGuide:
+    """Helper for formatting prompt engineering instructions."""
+
+    intro: str = "Apply the following prompt engineering best practices when drafting the plan:"
+
+    def format_instructions(self, techniques: Iterable[PromptTechnique]) -> str:
+        """Return a formatted instruction block for the given techniques."""
+
+        items = list(dict.fromkeys(techniques))  # Preserve order while removing duplicates
+        if not items:
+            return ""
+
+        bullet_lines = [f"- {tech.value}: {tech.description}" for tech in items]
+        return "\n".join([self.intro, *bullet_lines])
+
+
 @dataclass
 class ActionPlan:
     """Structured plan for executing a task intent."""
@@ -58,24 +127,41 @@ class ActionPlan:
 class IntentProcessor:
     """Processes high-level intents into structured action plans."""
 
-    def __init__(self, llm_agent: LlmAgent):
+    def __init__(
+        self,
+        llm_agent: LlmAgent,
+        prompt_guide: Optional[PromptEngineeringGuide] = None,
+    ):
         self.llm = llm_agent
+        self.prompt_guide = prompt_guide or PromptEngineeringGuide()
 
-    async def process_intent(self, intent: TaskIntent) -> ActionPlan:
+    async def process_intent(
+        self,
+        intent: TaskIntent,
+        techniques: Optional[Iterable[PromptTechnique]] = None,
+    ) -> ActionPlan:
         """Convert a high-level intent into an action plan."""
+        prompt_sections = [
+            "Analyze this task intent and create a structured plan:",
+            f"Description: {intent.description}",
+            f"Context: {intent.context}",
+            f"Constraints: {intent.constraints}",
+            "",
+            "Generate a detailed plan with:",
+            "1. Sequential steps with clear success criteria",
+            "2. Required resources and dependencies",
+            "3. Estimated duration and complexity",
+            "4. Measurable success metrics",
+        ]
+
+        if techniques:
+            prompt_sections.append("")
+            prompt_sections.append(self.prompt_guide.format_instructions(techniques))
+
+        prompt = "\n".join(prompt_sections)
+
         # Use LLM to analyze and structure the intent
-        response = await self.llm.generate_response(
-            f"""Analyze this task intent and create a structured plan:
-            Description: {intent.description}
-            Context: {intent.context}
-            Constraints: {intent.constraints}
-            
-            Generate a detailed plan with:
-            1. Sequential steps with clear success criteria
-            2. Required resources and dependencies
-            3. Estimated duration and complexity
-            4. Measurable success metrics"""
-        )
+        response = await self.llm.generate_response(prompt)
         
         # Parse LLM response into structured plan
         plan_data = self._parse_llm_response(response)
