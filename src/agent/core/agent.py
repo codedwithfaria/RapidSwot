@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import (
     Any,
     AsyncGenerator,
@@ -14,8 +14,10 @@ from typing import (
     Iterable,
     List,
     Optional,
+    Protocol,
     Tuple,
     Union,
+    runtime_checkable,
 )
 
 from google.adk.agents import BaseAgent, LlmAgent
@@ -34,10 +36,21 @@ class TaskIntent:
     preferences: Dict[str, Any] = field(default_factory=dict)
     success_criteria: Dict[str, Any] = field(default_factory=dict)
 
+@runtime_checkable
+class PlanStepLike(Protocol):
+    """Runtime protocol representing planner step objects."""
+
+    action: str
+    params: Dict[str, Any]
+
+
+PlanStep = Union[Dict[str, Any], PlanStepLike]
+
+
 @dataclass
 class ActionPlan:
     """Structured plan for executing a task intent."""
-    steps: List[Dict[str, Any]]
+    steps: List[PlanStep]
     resources: Dict[str, Any]
     estimated_duration: float
     success_metrics: Dict[str, Any]
@@ -205,26 +218,21 @@ class ExecutionEngine:
         """Execute an action plan step by step."""
         for step in plan.steps:
             try:
-                if not isinstance(step, dict):
-                    raise TypeError(f"Plan step must be a mapping, received: {type(step)!r}")
-
-                tool_name = step.get("tool")
-                if not tool_name:
-                    raise KeyError("Plan step missing required 'tool' field")
+                tool_name, params, step_payload = self._coerce_step(step)
 
                 tool = self.available_tools.get(tool_name)
                 if not tool:
                     raise ValueError(f"Tool not found: {tool_name}")
 
-                invocation = tool(step.get("params", {}), context)
+                invocation = tool(params, context)
                 result = await invocation if asyncio.iscoroutine(invocation) else invocation
 
                 yield Event(
                     author="ExecutionEngine",
-                    content={"step": step, "result": result},
+                    content={"step": step_payload, "result": result},
                     actions=EventActions(escalate=False)
                 )
-                
+
             except Exception as e:
                 logger.error(f"Step execution error: {e}")
                 yield Event(
@@ -233,6 +241,47 @@ class ExecutionEngine:
                     actions=EventActions(escalate=True)
                 )
                 return
+
+    def _coerce_step(
+        self,
+        step: PlanStep,
+    ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+        """Normalize heterogeneous step payloads into a canonical representation."""
+
+        if isinstance(step, dict):
+            tool_name = step.get("tool") or step.get("action")
+            if not tool_name:
+                raise KeyError("Plan step missing required 'tool' or 'action' field")
+
+            params = step.get("params", {})
+            if not isinstance(params, dict):
+                raise TypeError("Plan step 'params' must be a mapping")
+
+            payload = dict(step)
+            payload.setdefault("tool", tool_name)
+            return tool_name, params, payload
+
+        if isinstance(step, PlanStepLike):
+            tool_name = step.action
+            params = getattr(step, "params", {}) or {}
+            if not isinstance(params, dict):
+                raise TypeError("Plan step 'params' must be a mapping")
+
+            if is_dataclass(step):
+                payload = asdict(step)
+            else:
+                payload = {
+                    "action": tool_name,
+                    "params": params,
+                }
+                for attr in ("description", "requirements", "validation", "retry_policy", "artifacts"):
+                    if hasattr(step, attr):
+                        payload[attr] = getattr(step, attr)
+
+            payload.setdefault("tool", tool_name)
+            return tool_name, params, payload
+
+        raise TypeError(f"Plan step must be a mapping or PlanStepLike instance, got {type(step)!r}")
 
 class RapidSwotAgent(BaseAgent):
     """Main agent class that bridges intentions to actions."""

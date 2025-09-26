@@ -4,6 +4,7 @@ from typing import Any, Dict
 import pytest
 
 from src.agent.core.agent import ActionPlan, ExecutionEngine, IntentProcessor
+from src.sequential.planner import Step
 
 
 class DummyLlm:
@@ -160,3 +161,53 @@ def test_execution_engine_validates_step_structure():
     assert len(events) == 1
     assert events[0].actions.escalate is True
     assert "mapping" in events[0].content["error"]
+
+
+def test_execution_engine_accepts_action_alias():
+    engine = ExecutionEngine()
+    engine.register_tool("noop", lambda params, ctx: params["value"])
+
+    plan = ActionPlan(
+        steps=[{"action": "noop", "params": {"value": 7}}],
+        resources={},
+        estimated_duration=0.0,
+        success_metrics={},
+    )
+
+    events = []
+
+    async def _collect_events():
+        async for event in engine.execute_plan(plan, {}):
+            events.append(event)
+
+    asyncio.run(_collect_events())
+
+    assert len(events) == 1
+    assert events[0].content["result"] == 7
+    assert events[0].content["step"]["tool"] == "noop"
+
+
+def test_execution_engine_handles_step_objects():
+    engine = ExecutionEngine()
+    engine.register_tool("navigate", lambda params, ctx: params["url"])
+
+    step = Step(action="navigate", params={"url": "https://example.com"}, description="go")
+
+    plan = ActionPlan(
+        steps=[step],
+        resources={},
+        estimated_duration=0.0,
+        success_metrics={},
+    )
+
+    events = []
+
+    async def _collect_events():
+        async for event in engine.execute_plan(plan, {}):
+            events.append(event)
+
+    asyncio.run(_collect_events())
+
+    assert len(events) == 1
+    assert events[0].content["result"] == "https://example.com"
+    assert events[0].content["step"]["action"] == "navigate"
