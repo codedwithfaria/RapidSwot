@@ -79,8 +79,12 @@ class PromptTechnique(Enum):
 
 _TECHNIQUE_DESCRIPTIONS: Dict[PromptTechnique, str] = {
     PromptTechnique.ZERO_SHOT: "Solve tasks directly from instructions without examples to test generalization.",
-    PromptTechnique.FEW_SHOT: "Provide representative examples to guide the model toward desired outputs.",
-    PromptTechnique.CHAIN_OF_THOUGHT: "Encourage explicit reasoning steps before answering for complex problems.",
+    PromptTechnique.FEW_SHOT: (
+        "Show concise input/output exemplars so the model can mirror the demonstrated pattern and raise answer quality."
+    ),
+    PromptTechnique.CHAIN_OF_THOUGHT: (
+        "Ask the model to think step-by-step, decomposing complex problems into intermediate reasoning before final answers."
+    ),
     PromptTechnique.META: "Use instructions that describe how to construct or critique prompts themselves.",
     PromptTechnique.SELF_CONSISTENCY: "Sample multiple reasoning paths and pick the most consistent answer.",
     PromptTechnique.GENERATE_KNOWLEDGE: "Ask the model to recall or synthesize supporting facts before solving.",
@@ -92,7 +96,9 @@ _TECHNIQUE_DESCRIPTIONS: Dict[PromptTechnique, str] = {
     PromptTechnique.ACTIVE_PROMPT: "Prioritize difficult examples when crafting few-shot demonstrations.",
     PromptTechnique.DIRECTIONAL_STIMULUS: "Nudge generation with steering phrases that emphasize desired traits.",
     PromptTechnique.PROGRAM_AIDED: "Pair natural language with code execution for reliable calculations.",
-    PromptTechnique.REACT: "Mix reasoning traces with tool actions for grounded decision making.",
+    PromptTechnique.REACT: (
+        "Blend explicit reasoning with grounded tool use so the model can plan, act, and verify results during execution."
+    ),
     PromptTechnique.REFLEXION: "Reflect on earlier attempts and critique them to self-correct.",
     PromptTechnique.MULTIMODAL_COT: "Extend chain-of-thought to combine textual and visual reasoning.",
     PromptTechnique.GRAPH_PROMPTING: "Represent relational knowledge explicitly to support structured reasoning.",
@@ -103,7 +109,9 @@ _TECHNIQUE_DESCRIPTIONS: Dict[PromptTechnique, str] = {
 class PromptEngineeringGuide:
     """Helper for formatting prompt engineering instructions."""
 
-    intro: str = "Apply the following prompt engineering best practices when drafting the plan:"
+    intro: str = (
+        "Effective prompt design matters—apply these structured techniques to plan with clarity, specificity, and safe reasoning:"
+    )
 
     def format_instructions(self, techniques: Iterable[PromptTechnique]) -> str:
         """Return a formatted instruction block for the given techniques."""

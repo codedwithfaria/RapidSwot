@@ -30,7 +30,7 @@ def test_prompt_guide_formats_instructions_without_duplicates():
 
     assert PromptTechnique.ZERO_SHOT.value in formatted
     assert formatted.count(PromptTechnique.ZERO_SHOT.value) == 1
-    assert "Apply the following prompt engineering" in formatted
+    assert "Effective prompt design matters" in formatted
 
 
 def test_intent_processor_includes_prompting_instructions():
